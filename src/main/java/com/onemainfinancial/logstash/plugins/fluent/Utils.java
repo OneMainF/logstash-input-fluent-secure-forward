@@ -1,19 +1,21 @@
 package com.onemainfinancial.logstash.plugins.fluent;
 
-import org.msgpack.type.Value;
+
+import org.msgpack.core.MessagePack;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Random;
 
-class Utils {
+public class Utils {
     private static final String MD_ALGORITHM = "SHA-512";
 
     private Utils() {
         //no-op
     }
 
-    static String getHexDigest(byte[]... updates) {
+
+    public static String getHexDigest(byte[]... updates) {
         try {
             MessageDigest md = MessageDigest.getInstance(MD_ALGORITHM);
             StringBuilder hexString = new StringBuilder();
@@ -33,32 +35,8 @@ class Utils {
         }
     }
 
-    static String asString(Value value) {
-        char[] chars = value.toString().toCharArray();
-        int l = chars.length;
-        if(l == 0){
-            return "";
-        }
-        StringBuilder b = new StringBuilder();
-        int s = 0;
-        boolean escaped = false;
-        if (chars[0] == '"') {
-            s = 1;
-            l = l - 1;
-        }
-        for (int i = s; i < l; i++) {
-            char x = chars[i];
-            if (!escaped && x == '\\') {
-                escaped = true;
-                continue;
-            }
-            escaped = false;
-            b.append(x);
-        }
-        return b.toString();
-    }
 
-    static byte[] generateSalt() {
+    public static byte[] generateSalt() {
         byte[] b = new byte[16];
         new Random().nextBytes(b);
         return b;

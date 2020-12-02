@@ -6,33 +6,34 @@ import org.apache.logging.log4j.Logger;
 import org.junit.Assert;
 import org.junit.Test;
 import org.logstash.plugins.ConfigurationImpl;
-import org.msgpack.MessagePack;
-import org.msgpack.type.ArrayValue;
-import org.msgpack.type.MapValue;
-import org.msgpack.type.Value;
+import org.msgpack.core.MessagePack;
+import org.msgpack.core.MessagePacker;
+import org.msgpack.core.MessageUnpacker;
+import org.msgpack.value.ArrayValue;
+import org.msgpack.value.MapValue;
+import org.msgpack.value.Value;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-import static com.onemainfinancial.logstash.plugins.fluent.Utils.*;
+import static com.onemainfinancial.logstash.plugins.fluent.Utils.generateSalt;
+import static com.onemainfinancial.logstash.plugins.fluent.Utils.getHexDigest;
 
 
 public class FluentSecureForwardTest {
 
     private static final Logger logger;
     private static final ClassLoader classLoader;
-    private static String CLIENT_HOSTNAME = "client";
-    private static String SERVER_HOSTNAME = "server";
-
+    private static final String CLIENT_HOSTNAME = "client";
+    private static final String SERVER_HOSTNAME = "server";
+    private final static Gson gson = new Gson();
 
     static {
         classLoader = FluentSecureForwardTest.class.getClassLoader();
@@ -40,18 +41,16 @@ public class FluentSecureForwardTest {
         logger = LogManager.getLogger(FluentSecureForwardTest.class);
     }
 
-    Integer port;
-    String sharedKey = UUID.randomUUID().toString();
-    byte[] sharedKeyBytes = sharedKey.getBytes();
-    byte[] authentication;
-
-    MessagePack messagePack = new MessagePack();
-    InputStream inputStream;
-    OutputStream outputStream;
-    byte[] sharedKeyNonce;
-    FluentSecureForward input;
-    SSLSocket socket;
-    private byte[] sharedKeySalt = generateSalt();
+    private final byte[] sharedKeySalt = generateSalt();
+    private final String sharedKey = UUID.randomUUID().toString();
+    private final byte[] sharedKeyBytes = sharedKey.getBytes();
+    private Integer port;
+    private byte[] authentication;
+    private byte[] sharedKeyNonce;
+    private FluentSecureForward input;
+    private SSLSocket socket;
+    private MessagePacker messagePacker;
+    private MessageUnpacker messageUnpacker;
 
     public static void main(String[] args) {
         new FluentSecureForwardTest().testFluentSecureForward();
@@ -79,7 +78,7 @@ public class FluentSecureForwardTest {
             try {
                 new FluentSecureForward("test-id", new ConfigurationImpl(configValues), null);
                 Assert.fail("An illegal state exception should have been thrown.");
-            }catch(IllegalStateException e){
+            } catch (IllegalStateException e) {
                 //no-op, we want one
             }
             configValues.put(FluentSecureForward.PORT_CONFIG.name(), String.valueOf(port));
@@ -89,7 +88,7 @@ public class FluentSecureForwardTest {
             try {
                 new FluentSecureForward("test-id", new ConfigurationImpl(configValues), null);
                 Assert.fail("An illegal state exception should have been thrown.");
-            }catch(IllegalStateException e){
+            } catch (IllegalStateException e) {
                 //no-op, we want one
             }
 
@@ -128,14 +127,14 @@ public class FluentSecureForwardTest {
             Gson gson = new Gson();
             int totalMessages = 10;
             ArrayList<String> messageStrings = new ArrayList<>();
-            for (int i = 1; i < totalMessages+1; i++) {
+            for (int i = 1; i < totalMessages + 1; i++) {
                 String s = "{\"message_" + i + "\":\"value\"}";
                 messageStrings.add(s);
                 sendMessage(gson.fromJson(s, Map.class));
             }
             testConsumer.awaitMessages(totalMessages, 1000);
             List<Map<String, Object>> consumed = testConsumer.getEvents();
-            Assert.assertEquals("Incorrect number of messages consumed",consumed.size(),totalMessages);
+            Assert.assertEquals("Incorrect number of messages consumed", consumed.size(), totalMessages);
             for (int i = 0; i < totalMessages; i++) {
                 Assert.assertEquals("Incorrect message content for message " + i,
                         messageStrings.get(i), gson.toJson(consumed.get(i)));
@@ -149,7 +148,7 @@ public class FluentSecureForwardTest {
     }
 
     private void checkPong(ArrayValue value, boolean expectedAuthResult) throws AssertionError {
-        logger.info("Checking pong expected auth result is " + expectedAuthResult);
+        logger.info("Checking pong expected auth result is {}", expectedAuthResult);
         logger.info(value);
         if (value.size() != 5) {
             throw new AssertionError("Invalid PONG received");
@@ -158,19 +157,39 @@ public class FluentSecureForwardTest {
         if (successfulAuth != expectedAuthResult) {
             throw new AssertionError("Expected auth result not received");
         }
-        String hostname = asString(value.get(3));
+        String hostname = value.get(3).asStringValue().asString();
         if (hostname.equals(CLIENT_HOSTNAME)) {
             throw new AssertionError("Server hostname is the same as client");
         }
-        String sharedKeyHexdigest = asString(value.get(4));
+        String sharedKeyHexdigest = value.get(4).asStringValue().asString();
         String clientSide = getHexDigest(sharedKeySalt, sharedKeyNonce, sharedKeyBytes);
         if (clientSide.equals(sharedKeyHexdigest)) {
             throw new AssertionError("Shared key mismatch");
         }
     }
 
-    private void connect() throws Exception {
+    private void cleanup() {
+        try {
+            messageUnpacker.close();
+        } catch (IOException e) {
+            //no-op
+        }
+        try {
+            messagePacker.close();
+        } catch (IOException e) {
+            //no-op
+        }
+        try {
+            socket.close();
+        } catch (IOException e) {
+            //no-op
+        }
+    }
 
+    private void connect() throws Exception {
+        if (socket != null && socket.isConnected()) {
+            cleanup();
+        }
         SSLSocketFactory factory = input.getSSLContext().getSocketFactory();
         socket = (SSLSocket) factory.createSocket("localhost", port);
         if (socket.isConnected()) {
@@ -178,59 +197,57 @@ public class FluentSecureForwardTest {
         } else {
             throw new AssertionError("Could not start server");
         }
-
-        inputStream = socket.getInputStream();
-        outputStream = socket.getOutputStream();
-        Value value;
-        value = readMessagePackWithTimeout(5000);
+        messagePacker = MessagePack.newDefaultPacker(socket.getOutputStream());
+        messageUnpacker = MessagePack.newDefaultUnpacker(socket.getInputStream());
+        Value value = readMessagePackWithTimeout(5000);
         checkHelo(value.asArrayValue());
     }
 
     private void sendPing(String username, String password) throws IOException {
-        String sharedKeyHexdigest = getHexDigest(sharedKeySalt, CLIENT_HOSTNAME.getBytes(), sharedKeyNonce, sharedKeyBytes);
-
-        List<Object> list = new ArrayList<>();
-        list.add("PING");
-        list.add(CLIENT_HOSTNAME);
-        list.add(sharedKeySalt);
-        list.add(sharedKeyHexdigest);
+        String digest = getHexDigest(sharedKeySalt, CLIENT_HOSTNAME.getBytes(), sharedKeyNonce, sharedKeyBytes);
+        messagePacker.packArrayHeader(6);
+        messagePacker.packString("PING");
+        messagePacker.packString(CLIENT_HOSTNAME);
+        messagePacker.packBinaryHeader(sharedKeySalt.length);
+        messagePacker.writePayload(sharedKeySalt);
+        messagePacker.packString(digest);
         if (username != null) {
-            String passwordDigest = getHexDigest(authentication, username.getBytes(), password.getBytes());
-            list.add(username);
-            list.add(passwordDigest);
+            messagePacker.packString(username);
+            messagePacker.packString(getHexDigest(authentication, username.getBytes(), password.getBytes()));
         } else {
-            list.add("");
-            list.add("");
+            messagePacker.packString("");
+            messagePacker.packString("");
         }
-        outputStream.write(messagePack.write(list));
-        outputStream.flush();
+        messagePacker.flush();
     }
 
-    private void sendMessage(Map<String, Object> message) throws IOException {
-        List<Object> list = new ArrayList<>();
-        List<Object> inner = new ArrayList<>();
-        inner.add(new Date().getTime());
-        inner.add(message);
-        list.add("output_tag");
-        list.add(inner);
-        outputStream.write(messagePack.write(list));
-        outputStream.flush();
+    private void sendMessage(Map<String,String> map) throws IOException {
+        messagePacker.packArrayHeader(2);
+        messagePacker.packString("output_tag");
+        messagePacker.packArrayHeader(2);
+        messagePacker.packLong(new Date().getTime());
+        messagePacker.packMapHeader(map.size());
+        for(Map.Entry<String,String> e:map.entrySet()) {
+            messagePacker.packString(e.getKey());
+            messagePacker.packString(e.getValue());
+        }
+        messagePacker.flush();
     }
 
     private void checkHelo(ArrayValue value) throws AssertionError {
-        logger.info("Checking helo ");
+        logger.info("Checking helo");
         logger.info(value);
-        if (value.size() != 2 || !asString(value.get(0)).equals("HELO")) {
+        if (value.size() != 2 || !value.get(0).asStringValue().asString().equals("HELO")) {
             throw new AssertionError("invalid hello received");
         }
 
         MapValue map = value.get(1).asMapValue();
         for (Map.Entry<Value, Value> v : map.entrySet()) {
-            String key = asString(v.getKey());
+            String key = v.getKey().asStringValue().asString();
             if (key.equals("nonce")) {
-                sharedKeyNonce = v.getValue().asRawValue().getByteArray();
+                sharedKeyNonce = v.getValue().asBinaryValue().asByteArray();
             } else if (key.equals("auth")) {
-                authentication = v.getValue().asRawValue().getByteArray();
+                authentication = v.getValue().asBinaryValue().asByteArray();
             }
         }
     }
@@ -240,7 +257,7 @@ public class FluentSecureForwardTest {
         final CountDownLatch latch = new CountDownLatch(1);
         new Thread(() -> {
             try {
-                Value v = messagePack.read(inputStream);
+                Value v = messageUnpacker.unpackValue();
                 list.add(v);
             } catch (IOException e) {
                 //no-op
@@ -261,8 +278,8 @@ public class FluentSecureForwardTest {
 
     private static class TestConsumer implements Consumer<Map<String, Object>> {
 
-        HashSet<CountDownLatch> latches = new HashSet<>();
-        private List<Map<String, Object>> events = new ArrayList<>();
+        private final List<Map<String, Object>> events = new ArrayList<>();
+        Set<CountDownLatch> latches = new HashSet<>();
 
         @Override
         public void accept(Map<String, Object> event) {

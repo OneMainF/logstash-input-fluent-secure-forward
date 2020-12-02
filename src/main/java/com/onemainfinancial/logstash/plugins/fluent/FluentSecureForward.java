@@ -14,34 +14,35 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.*;
 import java.nio.file.Files;
-import java.security.GeneralSecurityException;
-import java.security.KeyException;
-import java.security.KeyFactory;
-import java.security.KeyStore;
+import java.security.*;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Consumer;
 
+import static co.elastic.logstash.api.PluginConfigSpec.*;
+
 // class name must match plugin name
 @LogstashPlugin(name = "fluent_secure_forward")
 public class FluentSecureForward implements Input {
-    static final PluginConfigSpec<String> SELF_HOSTNAME_CONFIG = PluginConfigSpec.stringSetting("self_hostname");
-    static final PluginConfigSpec<String> SHARED_KEY_CONFIG = PluginConfigSpec.requiredStringSetting("shared_key");
-    static final PluginConfigSpec<String> HOST_CONFIG = PluginConfigSpec.stringSetting("host", "0.0.0.0");
-    static final PluginConfigSpec<String> PORT_CONFIG = PluginConfigSpec.stringSetting("port", "24284");
-    static final PluginConfigSpec<String> SSL_VERSION_CONFIG = PluginConfigSpec.stringSetting("ssl_version", "TLSv1.2");
-    static final PluginConfigSpec<String> SSL_CIPHERS_CONFIG = PluginConfigSpec.stringSetting("ssl_ciphers", "");
-    static final PluginConfigSpec<Boolean> SSL_ENABLE_CONFIG = PluginConfigSpec.booleanSetting("ssl_enable", true);
-    static final PluginConfigSpec<String> SSL_CERT_CONFIG = PluginConfigSpec.requiredStringSetting("ssl_cert");
-    static final PluginConfigSpec<String> SSL_KEY_CONFIG = PluginConfigSpec.requiredStringSetting("ssl_key");
-    static final PluginConfigSpec<Boolean> AUTHENTICATION_CONFIG = PluginConfigSpec.booleanSetting("authentication", false);
-    static final PluginConfigSpec<Map<String, Object>> USERS_CONFIG = PluginConfigSpec.hashSetting("users");
-    private static final String PLUGIN_NAME = FluentSecureForward.class.getAnnotation(LogstashPlugin.class).name();
-    private static final Logger logger = LogManager.getLogger(FluentSecureForward.class);
+    static final PluginConfigSpec<String> SELF_HOSTNAME_CONFIG = stringSetting("self_hostname");
+    static final PluginConfigSpec<String> SHARED_KEY_CONFIG = requiredStringSetting("shared_key");
+    static final PluginConfigSpec<String> HOST_CONFIG = stringSetting("host", "0.0.0.0");
+    static final PluginConfigSpec<String> PORT_CONFIG = stringSetting("port", "24284");
+    static final PluginConfigSpec<String> SSL_VERSION_CONFIG = stringSetting("ssl_version", "TLSv1.2");
+    static final PluginConfigSpec<String> SSL_CIPHERS_CONFIG = stringSetting("ssl_ciphers", "");
+    static final PluginConfigSpec<Boolean> SSL_ENABLE_CONFIG = booleanSetting("ssl_enable", true);
+    static final PluginConfigSpec<String> SSL_CERT_CONFIG = requiredStringSetting("ssl_cert");
+    static final PluginConfigSpec<String> SSL_KEY_CONFIG = requiredStringSetting("ssl_key");
+    static final PluginConfigSpec<Boolean> AUTHENTICATION_CONFIG = booleanSetting("authentication", false);
+    static final PluginConfigSpec<Map<String, Object>> USERS_CONFIG = hashSetting("users");
+    static final String PLUGIN_NAME = FluentSecureForward.class.getAnnotation(LogstashPlugin.class).name();
+    static final Logger logger = LogManager.getLogger(FluentSecureForward.class);
     final String selfHostname;
     final boolean requireAuthentication;
     final HashMap<String, String> users = new HashMap<>();
@@ -53,14 +54,16 @@ public class FluentSecureForward implements Input {
     private final String sslCert;
     private final String sslKey;
     private final boolean sslEnable;
+    private final String id;
     byte[] sharedKeyBytes;
     byte[] selfHostnameBytes;
     boolean enableKeepalive = false; //TODO Implement keep alive
     InetAddress inetAddress;
     Consumer<Map<String, Object>> consumer;
     private ServerSocket socket = null;
-    private String id;
     private volatile boolean stopped;
+    private SSLContext sslContext;
+
 
     /**
      * Required constructor.
@@ -132,9 +135,21 @@ public class FluentSecureForward implements Input {
 
     }
 
-
     private ServerSocket getSSLServerSocket() throws GeneralSecurityException, IOException {
-        SSLContext sslContext;
+        SSLContext sslContext = getSSLContext();
+        SSLServerSocket sslServerSocket = (SSLServerSocket) sslContext
+                .getServerSocketFactory()
+                .createServerSocket(port, 0, inetAddress);
+        if (!sslCiphers[0].equals("")) {
+            sslServerSocket.setEnabledCipherSuites(sslCiphers);
+        }
+        return sslServerSocket;
+    }
+
+    public SSLContext getSSLContext() throws KeyStoreException, IOException, NoSuchAlgorithmException, CertificateException, KeyException, InvalidKeySpecException, UnrecoverableKeyException {
+        if (sslContext != null) {
+            return sslContext;
+        }
         char[] emptyPassword = "".toCharArray();
         KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
         ks.load(null, emptyPassword);
@@ -166,13 +181,7 @@ public class FluentSecureForward implements Input {
         tmf.init(ks);
         sslContext = SSLContext.getInstance(sslVersion);
         sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
-        SSLServerSocket sslServerSocket = (SSLServerSocket) sslContext
-                .getServerSocketFactory()
-                .createServerSocket(port, 0, inetAddress);
-        if (!sslCiphers[0].equals("")) {
-            sslServerSocket.setEnabledCipherSuites(sslCiphers);
-        }
-        return sslServerSocket;
+        return sslContext;
     }
 
     private ServerSocket getServerSocket() throws IOException {
@@ -182,7 +191,7 @@ public class FluentSecureForward implements Input {
     private void acceptNewConnection() throws IOException {
         try {
             Socket client = socket.accept();
-            new Thread(new FluentSession(this, client)).start();
+            new FluentSession(this, client).start();
         } catch (SocketException e) {
             if (!stopped) {
                 logger.error("Caught socket exception", e);
@@ -204,11 +213,7 @@ public class FluentSecureForward implements Input {
 
         try {
             logger.info("Starting {} input listener {}:{}", PLUGIN_NAME, host, port);
-            if (sslEnable) {
-                socket = getSSLServerSocket();
-            } else {
-                socket = getServerSocket();
-            }
+            socket = sslEnable ? getSSLServerSocket() : getServerSocket();
             logger.debug("{} {} started on {}:{}", PLUGIN_NAME, id, host, port);
             while (!stopped) {
                 acceptNewConnection();

@@ -41,11 +41,16 @@ public class FluentSecureForward implements Input {
     static final PluginConfigSpec<String> SSL_KEY_CONFIG = requiredStringSetting("ssl_key");
     static final PluginConfigSpec<Boolean> AUTHENTICATION_CONFIG = booleanSetting("authentication", false);
     static final PluginConfigSpec<Map<String, Object>> USERS_CONFIG = hashSetting("users");
+    static final PluginConfigSpec<List<Object>> MULTILINE_CONFIG = arraySetting("multiline", new ArrayList<>(), false, false);
+
     static final String PLUGIN_NAME = FluentSecureForward.class.getAnnotation(LogstashPlugin.class).name();
     static final Logger logger = LogManager.getLogger(FluentSecureForward.class);
     final String selfHostname;
     final boolean requireAuthentication;
     final HashMap<String, String> users = new HashMap<>();
+    final byte[] sharedKeyBytes;
+    final byte[] selfHostnameBytes;
+    final boolean enableKeepalive = false; //TODO Implement keep alive
     private final CountDownLatch done = new CountDownLatch(1);
     private final String host;
     private final Integer port;
@@ -54,16 +59,17 @@ public class FluentSecureForward implements Input {
     private final String sslCert;
     private final String sslKey;
     private final boolean sslEnable;
+    private final List<MultilineProcessor> multilineProcessors=new ArrayList<>();
     private final String id;
-    byte[] sharedKeyBytes;
-    byte[] selfHostnameBytes;
-    boolean enableKeepalive = false; //TODO Implement keep alive
     InetAddress inetAddress;
-    Consumer<Map<String, Object>> consumer;
+    public Consumer<Map<String, Object>> consumer;
     private ServerSocket socket = null;
     private volatile boolean stopped;
     private SSLContext sslContext;
 
+    public boolean isStopped(){
+        return stopped;
+    }
 
     /**
      * Required constructor.
@@ -73,6 +79,7 @@ public class FluentSecureForward implements Input {
      * @param context       Logstash Context
      */
     public FluentSecureForward(final String id, final Configuration config, final Context context) {
+
         this.id = id;
         // constructors should validate configuration options
         if (config.contains(SELF_HOSTNAME_CONFIG)) {
@@ -97,6 +104,9 @@ public class FluentSecureForward implements Input {
         sslCert = config.get(SSL_CERT_CONFIG);
         sslKey = config.get(SSL_KEY_CONFIG);
         sslEnable = config.get(SSL_ENABLE_CONFIG);
+        for (Object o:config.get(MULTILINE_CONFIG)){
+            multilineProcessors.add(new MultilineProcessor(o,this));
+        }
         try {
             inetAddress = InetAddress.getByName(host);
         } catch (UnknownHostException e) {
@@ -132,6 +142,7 @@ public class FluentSecureForward implements Input {
                 this.users.put(e.getKey().toLowerCase(), e.getValue().toString());
             }
         }
+        logger.debug("Created fluent secure forward "+this);
 
     }
 
@@ -237,6 +248,9 @@ public class FluentSecureForward implements Input {
             }
         }
         logger.info("{} {} stopped", PLUGIN_NAME, this.id);
+        for(MultilineProcessor p:multilineProcessors){
+            p.stop();
+        }
     }
 
     @Override
@@ -260,12 +274,33 @@ public class FluentSecureForward implements Input {
                         SSL_VERSION_CONFIG,
                         SSL_CIPHERS_CONFIG,
                         SSL_CERT_CONFIG,
-                        SSL_KEY_CONFIG
+                        SSL_KEY_CONFIG,
+                        MULTILINE_CONFIG
                 ));
     }
 
     @Override
     public String getId() {
         return this.id;
+    }
+
+    public void accept(Map<String, Object> map) {
+        boolean processed=false;
+        for(MultilineProcessor processor:multilineProcessors){
+            if(processor.shouldProcess(map)){
+                processed=true;
+                processor.accept(map);
+                if(!processor.shouldContinue){
+                    return;
+                }
+            }
+        }
+        if(!processed) {
+            consumer.accept(map);
+        }
+    }
+
+    public void writeMessage(Map<String, Object> map) {
+        consumer.accept(map);
     }
 }

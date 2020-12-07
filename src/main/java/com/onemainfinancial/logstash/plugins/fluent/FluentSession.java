@@ -13,6 +13,7 @@ import org.msgpack.value.ValueType;
 
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLSocket;
+import javax.security.sasl.AuthenticationException;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.Socket;
@@ -29,15 +30,15 @@ public class FluentSession extends Thread {
     private final byte[] authKeySalt = generateSalt();
     private final Socket session;
     private final FluentSecureForward parent;
-    private final String id;
+    private final String fromAddress;
     private MessageUnpacker messageUnpacker;
     private MessagePacker messagePacker;
 
     FluentSession(FluentSecureForward parent, Socket socket) {
         this.parent = parent;
         this.session = socket;
-        this.id = session.getRemoteSocketAddress().toString();
-        logger.info("Received connection {}", id);
+        this.fromAddress = session.getRemoteSocketAddress().toString();
+        logger.info("Received connection from {}", fromAddress);
     }
 
     private void sendPong(PingResult pingResult) throws IOException {
@@ -99,7 +100,7 @@ public class FluentSession extends Thread {
     private void decodeEvent(Value value) {
         try {
             ValueType valueType = value.getValueType();
-            logger.trace("Checking value type {} from {}",valueType,id);
+            logger.trace("Checking value type {} from {}", valueType, fromAddress);
             switch (valueType) {
                 case BINARY:
                     decodeEvent(MessagePack.newDefaultUnpacker(value.asBinaryValue().asByteArray()).unpackValue());
@@ -108,43 +109,58 @@ public class FluentSession extends Thread {
                     decodeEvent(MessagePack.newDefaultUnpacker(value.asStringValue().asByteArray()).unpackValue());
                     break;
                 case ARRAY:
-                    for(Value v:value.asArrayValue()){
+                    for (Value v : value.asArrayValue()) {
                         this.decodeEvent(v);
                     }
                     break;
                 case MAP:
-                    parent.consumer.accept(gson.fromJson(value.asMapValue().toString(), Map.class));
+                    parent.accept(gson.fromJson(value.asMapValue().toString(), Map.class));
                     break;
                 default:
-                    logger.trace("Cannot handle value {} of type {} from {}",value, valueType, id);
+                    logger.trace("Cannot handle value {} of type {} from {}", value, valueType, fromAddress);
                     break;
             }
         } catch (Exception e) {
-            logger.error("Could not decode event from {}", id, e);
+            logger.error("Could not decode event from {}", fromAddress, e);
         }
     }
 
     private void readFromSession() throws IOException {
-        logger.info("Waiting for messages from {}",id);
+        logger.debug("Waiting for messages from {}", fromAddress);
         while (!session.isClosed()) {
             try {
-                ArrayValue arrayValue = messageUnpacker.unpackValue().asArrayValue();
-                logger.trace("Received message from {} {}",id,arrayValue);
-                String messageType = arrayValue.get(0).asStringValue().asString();
-                if (messageType.equals("PING")) {
-                    PingResult result = checkPing(arrayValue);
-                    sendPong(result);
-                    if (!result.successful) {
-                        return;
-                    }
-                } else {
-                    logger.trace("Received event of type {} from {}", messageType,id);
-                    decodeEvent(arrayValue.get(1));
-                }
+                unpackValues();
+                Thread.sleep(1000);
             } catch (MessageInsufficientBufferException e) {
-                logger.error("Caught insufficient buffer exception", e);
+                logger.debug("Caught insufficient buffer exception from {}", fromAddress);
+                logger.trace("Stack trace is", e);
+            } catch (AuthenticationException e) {
+                logger.error("Socket {} failed authentication", fromAddress, e);
+                return;
+            } catch (InterruptedException e) {
+                logger.error("Unexpected interrupt exception", e);
+                break;
             }
         }
+    }
+
+    private void unpackValues() throws IOException {
+        while (messageUnpacker.hasNext()) {
+            ArrayValue arrayValue = messageUnpacker.unpackValue().asArrayValue();
+            logger.trace("Received message from {} {}", fromAddress, arrayValue);
+            String messageType = arrayValue.get(0).asStringValue().asString();
+            if (messageType.equals("PING")) {
+                PingResult result = checkPing(arrayValue);
+                sendPong(result);
+                if (!result.successful) {
+                    throw new AuthenticationException("Client failed authentication");
+                }
+            } else {
+                logger.trace("Received event of type {} from {}", messageType, fromAddress);
+                decodeEvent(arrayValue.get(1));
+            }
+        }
+
     }
 
     public void run() {
@@ -160,12 +176,12 @@ public class FluentSession extends Thread {
             logger.info("Socket closed with reason " + e.getMessage());
         } catch (SSLHandshakeException e) {
             if (e.getMessage().equalsIgnoreCase(REMOVE_HOST_CLOSED_MESSAGE)) {
-                logger.info("Suppressed exception from socket {}", id, e);
+                logger.info("Suppressed exception from socket {}", fromAddress, e);
             } else {
-                logger.error("Caught SSLHandshakeException from socket {}", id, e);
+                logger.error("Caught SSLHandshakeException from socket {}", fromAddress, e);
             }
         } catch (Exception e) {
-            logger.error("Caught exception from socket {}", id, e);
+            logger.error("Caught exception from socket {}", fromAddress, e);
         }
         cleanup();
     }
@@ -174,17 +190,17 @@ public class FluentSession extends Thread {
         try {
             messageUnpacker.close();
         } catch (IOException e) {
-            logger.trace("Could not close message unpacker for {}", id, e);
+            logger.trace("Could not close message unpacker for {}", fromAddress, e);
         }
         try {
             messagePacker.close();
         } catch (IOException e) {
-            logger.trace("Could not close message packer for {}", id, e);
+            logger.trace("Could not close message packer for {}", fromAddress, e);
         }
         try {
             session.close();
         } catch (IOException e) {
-            logger.trace("Could not close session {}", id, e);
+            logger.trace("Could not close session {}", fromAddress, e);
         }
     }
 

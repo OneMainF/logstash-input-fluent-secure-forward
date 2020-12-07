@@ -7,3 +7,7 @@
 
 ## 2.0.0
 - Update to new version of message pack for use with OpenShift 4
+
+## 2.1.0
+- Add multiline support 
+- Fix insufficient buffer exception when data is not sent 

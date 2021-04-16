@@ -3,7 +3,11 @@ package com.onemainfinancial.logstash.plugins.fluent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import static com.onemainfinancial.logstash.plugins.fluent.Utils.getLong;
@@ -20,11 +24,12 @@ public class MultilineProcessor {
     private final boolean inverseMatch;
     private final long timeout;
     private final long maxMessages;
-    private final Map<String, Pattern> match = new HashMap<>();
+    private final Map<String, Pattern> match = new ConcurrentHashMap<>();
     private final FluentSecureForward parent;
     private final List<MultilineProcessor> multilineProcessors = new ArrayList<>();
-    private final Map<String, MessageGroup> groups = new HashMap<>();
+    private final Map<String, MessageGroup> groups = new ConcurrentHashMap<>();
     private final Thread timeoutThread;
+    private final long bufferTime;
 
     public MultilineProcessor(Object object, FluentSecureForward fluentSecureForward) {
         try {
@@ -32,13 +37,13 @@ public class MultilineProcessor {
             this.parent = fluentSecureForward;
             this.sourceField = (String) config.getOrDefault("field", "message");
             this.groupKey = (String) config.getOrDefault("group_key", ">>default group<<");
-            this.lineSeparator = (String) config.getOrDefault(("line_separator"), "\\n");
+            this.lineSeparator = (String) config.getOrDefault(("line_separator"), "\n");
             this.pattern = getPattern((String) config.getOrDefault("pattern", ".*"));
             this.discardPattern = getPattern((String) config.get("discard_pattern"));
-            this.inverseMatch = (Boolean) config.getOrDefault("inverse_match", false);
+            this.inverseMatch = Boolean.parseBoolean(config.getOrDefault("inverse_match", "false").toString());
             this.timeout = getLong(config, "timeout", (long) 5000);
             this.maxMessages = getLong(config, "max_messages", (long) 0);
-            this.shouldContinue = (Boolean) config.getOrDefault("continue", false);
+            this.shouldContinue = Boolean.parseBoolean(config.getOrDefault("continue", "false").toString());
             Object o = config.get("multiline");
             if (o != null) {
                 if (o instanceof List) {
@@ -57,28 +62,16 @@ public class MultilineProcessor {
             }
             ExpansionPattern.getExpansions(this.groupKey);
             if (timeout > 0) {
-                timeoutThread = new Thread(() -> {
-                    while (!parent.isStopped()) {
-                        try {
-                            Thread.sleep(100);
-                            long time = System.currentTimeMillis();
-                            Iterator<Map.Entry<String, MessageGroup>> it = groups.entrySet().iterator();
-                            while (it.hasNext()) {
-                                Map.Entry<String, MessageGroup> e = it.next();
-                                if ((time - e.getValue().updatedAt) > timeout) {
-                                    it.remove();
-                                    sendToNextProcessor(e.getValue().build());
-                                }
-                            }
-
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                    }
-                });
-                timeoutThread.start();
+                if (timeout > 2000) {
+                    bufferTime = 1000;
+                } else {
+                    bufferTime = 100;
+                }
+                this.timeoutThread = new Thread(this::flushBuffers);
+                this.timeoutThread.start();
             } else {
-                timeoutThread = null;
+                this.bufferTime = 0;
+                this.timeoutThread = null;
             }
 
             logger.debug("Created multiline processor " + this);
@@ -97,6 +90,28 @@ public class MultilineProcessor {
             logger.error("Caught exception getting event value", e);
             return null;
         }
+    }
+
+    private void flushBuffers() {
+
+        while (!parent.isStopped()) {
+            try {
+                Thread.sleep(bufferTime);
+                long time = System.currentTimeMillis();
+                Iterator<Map.Entry<String, MessageGroup>> it = groups.entrySet().iterator();
+                while (it.hasNext()) {
+                    Map.Entry<String, MessageGroup> e = it.next();
+                    if ((time - e.getValue().updatedAt) > timeout) {
+                        sendToNextProcessor(e.getValue().build());
+                        it.remove();
+                    }
+                }
+
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+
     }
 
     public void stop() {
@@ -131,14 +146,12 @@ public class MultilineProcessor {
 
     public void accept(Map<String, Object> map) {
         String fieldValue = getStringFromEvent(sourceField, map);
-        boolean wasNull = false;
         boolean matches = false;
         if (fieldValue != null) {
             if (discardPattern != null && discardPattern.matcher(fieldValue).matches()) {
                 return;
             }
             matches = pattern.matcher(fieldValue).matches();
-
             if (inverseMatch) {
                 matches = !matches;
             }

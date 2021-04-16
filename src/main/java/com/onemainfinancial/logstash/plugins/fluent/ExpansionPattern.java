@@ -1,12 +1,12 @@
 package com.onemainfinancial.logstash.plugins.fluent;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ExpansionPattern {
-    private static final Map<String, List<ExpansionPattern>> expansions = new HashMap<>();
+    private static final Map<String, List<ExpansionPattern>> expansions = new ConcurrentHashMap<>();
     public final int startIndex;
     public final int endIndex;
     public final String field;
@@ -26,7 +26,7 @@ public class ExpansionPattern {
         int lastIndex = 0;
         for (ExpansionPattern p : e) {
             sb.append(key, lastIndex, p.startIndex);
-            Object s = Utils.get(event,p.field);
+            Object s = Utils.get(event, p.field);
             if (s == null) {
                 s = "";
             }

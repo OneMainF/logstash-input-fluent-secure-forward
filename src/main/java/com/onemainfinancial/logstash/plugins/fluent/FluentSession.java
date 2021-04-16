@@ -95,6 +95,13 @@ public class FluentSession extends Thread {
         return new PingResult(true, sharedKeySalt);
     }
 
+    private void unpackBytes(byte[] bytes) throws IOException {
+        try (MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(bytes)) {
+            while (unpacker.hasNext()) {
+                decodeEvent(unpacker.unpackValue());
+            }
+        }
+    }
 
     @SuppressWarnings("unchecked")
     private void decodeEvent(Value value) {
@@ -103,10 +110,10 @@ public class FluentSession extends Thread {
             logger.trace("Checking value type {} from {}", valueType, fromAddress);
             switch (valueType) {
                 case BINARY:
-                    decodeEvent(MessagePack.newDefaultUnpacker(value.asBinaryValue().asByteArray()).unpackValue());
+                    unpackBytes(value.asBinaryValue().asByteArray());
                     break;
                 case STRING:
-                    decodeEvent(MessagePack.newDefaultUnpacker(value.asStringValue().asByteArray()).unpackValue());
+                    unpackBytes(value.asStringValue().asByteArray());
                     break;
                 case ARRAY:
                     for (Value v : value.asArrayValue()) {
@@ -182,25 +189,20 @@ public class FluentSession extends Thread {
             }
         } catch (Exception e) {
             logger.error("Caught exception from socket {}", fromAddress, e);
+        } finally {
+            closeAll(messagePacker, messageUnpacker, session);
         }
-        cleanup();
     }
 
-    private void cleanup() {
-        try {
-            messageUnpacker.close();
-        } catch (IOException e) {
-            logger.trace("Could not close message unpacker for {}", fromAddress, e);
-        }
-        try {
-            messagePacker.close();
-        } catch (IOException e) {
-            logger.trace("Could not close message packer for {}", fromAddress, e);
-        }
-        try {
-            session.close();
-        } catch (IOException e) {
-            logger.trace("Could not close session {}", fromAddress, e);
+    private void closeAll(AutoCloseable... closeables) {
+        for (AutoCloseable closeable : closeables) {
+            if(closeable!=null) {
+                try {
+                    closeable.close();
+                } catch (Exception e) {
+                    logger.trace("Could not close {}", closeable, e);
+                }
+            }
         }
     }
 

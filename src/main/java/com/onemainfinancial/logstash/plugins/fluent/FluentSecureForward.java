@@ -199,13 +199,15 @@ public class FluentSecureForward implements Input {
         return ServerSocketFactory.getDefault().createServerSocket(port, 0, inetAddress);
     }
 
-    private void acceptNewConnection() throws IOException {
-        try {
-            Socket client = socket.accept();
-            new FluentSession(this, client).start();
-        } catch (SocketException e) {
-            if (!stopped) {
-                logger.error("Caught socket exception", e);
+    private void acceptConnections() throws IOException {
+        while (!stopped) {
+            try {
+                Socket client = socket.accept();
+                new FluentSession(this, client).start();
+            } catch (SocketException e) {
+                if (!stopped) {
+                    logger.error("Caught socket exception", e);
+                }
             }
         }
     }
@@ -226,9 +228,8 @@ public class FluentSecureForward implements Input {
             logger.info("Starting {} input listener {}:{}", PLUGIN_NAME, host, port);
             socket = sslEnable ? getSSLServerSocket() : getServerSocket();
             logger.debug("{} {} started on {}:{}", PLUGIN_NAME, id, host, port);
-            while (!stopped) {
-                acceptNewConnection();
-            }
+            acceptConnections();
+
         } catch (Exception e) {
             logger.error("Could not start server ", e);
         } finally {

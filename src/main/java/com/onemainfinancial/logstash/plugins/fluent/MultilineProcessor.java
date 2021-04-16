@@ -26,6 +26,7 @@ public class MultilineProcessor {
     private final Map<String, MessageGroup> groups = new HashMap<>();
     private final Thread timeoutThread;
 
+
     public MultilineProcessor(Object object, FluentSecureForward fluentSecureForward) {
         try {
             Map<String, Object> config = (Map<String, Object>) object;
@@ -35,10 +36,10 @@ public class MultilineProcessor {
             this.lineSeparator = (String) config.getOrDefault(("line_separator"), "\\n");
             this.pattern = getPattern((String) config.getOrDefault("pattern", ".*"));
             this.discardPattern = getPattern((String) config.get("discard_pattern"));
-            this.inverseMatch = (Boolean) config.getOrDefault("inverse_match", false);
+            this.inverseMatch = Boolean.parseBoolean(config.getOrDefault("inverse_match", "false").toString());
             this.timeout = getLong(config, "timeout", (long) 5000);
             this.maxMessages = getLong(config, "max_messages", (long) 0);
-            this.shouldContinue = (Boolean) config.getOrDefault("continue", false);
+            this.shouldContinue = Boolean.parseBoolean(config.getOrDefault("continue", "false").toString());
             Object o = config.get("multiline");
             if (o != null) {
                 if (o instanceof List) {
@@ -131,14 +132,12 @@ public class MultilineProcessor {
 
     public void accept(Map<String, Object> map) {
         String fieldValue = getStringFromEvent(sourceField, map);
-        boolean wasNull = false;
         boolean matches = false;
         if (fieldValue != null) {
             if (discardPattern != null && discardPattern.matcher(fieldValue).matches()) {
                 return;
             }
             matches = pattern.matcher(fieldValue).matches();
-
             if (inverseMatch) {
                 matches = !matches;
             }

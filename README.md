@@ -66,7 +66,7 @@ Example logstash config:
             username => "password"              
         } 
         multiline => [{
-           group_key => "%{[host][name]}:%{[kubernetes][pod_name]}",
+           group_key => "%{[host][name]}:%{[kubernetes][pod_name]}"
            match => {
              "[kubernetes][pod_name]" => "app1-.*"
            }

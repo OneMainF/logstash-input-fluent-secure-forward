@@ -194,7 +194,7 @@ public class FluentSession extends Thread {
     }
 
     private void closeAll(AutoCloseable... closeables) {
-        logger.info("Closing connection to {}", fromAddress);
+        logger.debug("Closing connection to {}", fromAddress);
         for (AutoCloseable closeable : closeables) {
             if (closeable != null) {
                 try {

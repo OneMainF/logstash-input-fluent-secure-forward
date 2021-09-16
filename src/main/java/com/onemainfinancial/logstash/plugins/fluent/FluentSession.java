@@ -18,14 +18,16 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.net.Socket;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static com.onemainfinancial.logstash.plugins.fluent.Utils.generateSalt;
 import static com.onemainfinancial.logstash.plugins.fluent.Utils.getHexDigest;
 
 public class FluentSession extends Thread {
+
     private static final String REMOVE_HOST_CLOSED_MESSAGE = "Remote host closed connection during handshake";
     private static final Logger logger = LogManager.getLogger(FluentSession.class);
-    private final static Gson gson = new Gson();
+    private final Gson gson = new Gson();
     private final byte[] sharedKeyNonce = generateSalt();
     private final byte[] authKeySalt = generateSalt();
     private final Socket session;
@@ -38,7 +40,7 @@ public class FluentSession extends Thread {
         this.parent = parent;
         this.session = socket;
         this.fromAddress = session.getRemoteSocketAddress().toString();
-        logger.info("Received connection from {}", fromAddress);
+        logger.debug("Received connection from {}", fromAddress);
     }
 
     private void sendPong(PingResult pingResult) throws IOException {
@@ -132,44 +134,36 @@ public class FluentSession extends Thread {
         }
     }
 
-    private void readFromSession() throws IOException {
-        logger.debug("Waiting for messages from {}", fromAddress);
-        while (!session.isClosed()) {
-            try {
-                unpackValues();
-                Thread.sleep(1000);
-            } catch (MessageInsufficientBufferException e) {
-                logger.debug("Caught insufficient buffer exception from {}", fromAddress);
-                logger.trace("Stack trace is", e);
-            } catch (AuthenticationException e) {
-                logger.error("Socket {} failed authentication", fromAddress, e);
-                return;
-            } catch (InterruptedException e) {
-                logger.error("Unexpected interrupt exception", e);
-                break;
-            }
-        }
-    }
-
-    private void unpackValues() throws IOException {
-        while (messageUnpacker.hasNext()) {
-            ArrayValue arrayValue = messageUnpacker.unpackValue().asArrayValue();
-            logger.trace("Received message from {} {}", fromAddress, arrayValue);
-            String messageType = arrayValue.get(0).asStringValue().asString();
-            if (messageType.equals("PING")) {
-                PingResult result = checkPing(arrayValue);
-                sendPong(result);
-                if (!result.successful) {
-                    throw new AuthenticationException("Client failed authentication");
+    private boolean unpackValues() throws IOException {
+        try {
+            logger.debug("Attempting to unpack values from {}", fromAddress);
+            boolean messageRead = false;
+            while (messageUnpacker.hasNext()) {
+                ArrayValue arrayValue = messageUnpacker.unpackValue().asArrayValue();
+                messageRead = true;
+                logger.trace("Received message from {} {}", fromAddress, arrayValue);
+                String messageType = arrayValue.get(0).asStringValue().asString();
+                if (messageType.equals("PING")) {
+                    PingResult result = checkPing(arrayValue);
+                    sendPong(result);
+                    if (!result.successful) {
+                        throw new AuthenticationException("Client failed authentication");
+                    }
+                } else {
+                    logger.trace("Received event of type {} from {}", messageType, fromAddress);
+                    decodeEvent(arrayValue.get(1));
                 }
-            } else {
-                logger.trace("Received event of type {} from {}", messageType, fromAddress);
-                decodeEvent(arrayValue.get(1));
             }
+            return messageRead;
+        } catch (MessageInsufficientBufferException e) {
+            logger.debug("Caught insufficient buffer exception from {}", fromAddress);
+            logger.trace("Stack trace is", e);
+            return true;
         }
-
     }
 
+    @Override
+    @SuppressWarnings("java:S2142")
     public void run() {
         try {
             if (session instanceof SSLSocket) {
@@ -178,12 +172,17 @@ public class FluentSession extends Thread {
             messageUnpacker = MessagePack.newDefaultUnpacker(session.getInputStream());
             messagePacker = MessagePack.newDefaultPacker(session.getOutputStream());
             sendHello();
-            readFromSession();
+            logger.debug("Waiting for messages from {}", fromAddress);
+            while (unpackValues()) {
+                TimeUnit.SECONDS.sleep(1);
+            }
+        } catch (AuthenticationException e) {
+            logger.error("Socket {} failed authentication", fromAddress);
         } catch (EOFException e) {
-            logger.info("Socket closed with reason " + e.getMessage());
+            logger.info("Socket closed with reason {}", e.getMessage());
         } catch (SSLHandshakeException e) {
             if (e.getMessage().equalsIgnoreCase(REMOVE_HOST_CLOSED_MESSAGE)) {
-                logger.info("Suppressed exception from socket {}", fromAddress, e);
+                logger.info("Remote host {} closed", fromAddress, e);
             } else {
                 logger.error("Caught SSLHandshakeException from socket {}", fromAddress, e);
             }
@@ -195,8 +194,9 @@ public class FluentSession extends Thread {
     }
 
     private void closeAll(AutoCloseable... closeables) {
+        logger.debug("Closing connection to {}", fromAddress);
         for (AutoCloseable closeable : closeables) {
-            if(closeable!=null) {
+            if (closeable != null) {
                 try {
                     closeable.close();
                 } catch (Exception e) {
